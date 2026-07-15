@@ -38,6 +38,19 @@ app.get("/api/state", (req, res) => {
   res.json({ configured: true, hasToken: Boolean(token), ...safe });
 });
 
+app.post("/api/workspace", (req, res) => {
+  const { workspaceId } = req.body || {};
+  const state = loadState();
+  if (!state?.token) return res.status(400).json({ error: "ابتدا توکن را وارد کنید." });
+  if (!workspaceId) return res.status(400).json({ error: "شناسه Workspace لازم است." });
+  if (!state.workspaces?.some((w) => w.id === workspaceId)) {
+    return res.status(400).json({ error: "این Workspace متعلق به این حساب نیست." });
+  }
+  state.workspaceId = workspaceId;
+  saveState(state);
+  res.json({ ok: true });
+});
+
 app.post("/api/token", async (req, res) => {
   const { token, repo } = req.body || {};
   if (!token || !repo) {
@@ -45,12 +58,23 @@ app.post("/api/token", async (req, res) => {
   }
   try {
     const me = await railway.verifyToken(token);
+    const workspaces = await railway.getWorkspaces(token);
+
     const state = loadState() || {};
     state.token = token;
     state.repo = repo;
     state.account = me;
+    state.workspaces = workspaces;
+    // Railway requires a workspaceId when creating a project. Most accounts
+    // only have one (their personal workspace), so pick it automatically;
+    // if there's more than one, the UI asks the user to choose.
+    if (workspaces.length === 1) {
+      state.workspaceId = workspaces[0].id;
+    } else {
+      delete state.workspaceId;
+    }
     saveState(state);
-    res.json({ ok: true, account: me });
+    res.json({ ok: true, account: me, workspaces, workspaceId: state.workspaceId || null });
   } catch (err) {
     res.status(400).json({ error: `توکن تایید نشد: ${err.message}` });
   }
@@ -71,13 +95,19 @@ app.post("/api/reset", (req, res) => {
 app.post("/api/deploy", async (req, res) => {
   const state = loadState();
   if (!state?.token) return res.status(400).json({ error: "ابتدا توکن را وارد کنید." });
+  if (!state.workspaceId) {
+    return res.status(400).json({
+      error: "workspace_required",
+      workspaces: state.workspaces || [],
+    });
+  }
 
-  const { token, repo } = state;
+  const { token, repo, workspaceId } = state;
 
   try {
     // 1. Project + service (create once, reuse afterwards)
     if (!state.projectId) {
-      const { projectId, environmentId } = await railway.createProject(token, "mtproto-proxy");
+      const { projectId, environmentId } = await railway.createProject(token, "mtproto-proxy", workspaceId);
       state.projectId = projectId;
       state.environmentId = environmentId;
       saveState(state);
